@@ -1,0 +1,36 @@
+[project]
+name = "snake-laya"
+version = "0.1.0"
+description = "Human vs Laya snake with live decision telemetry"
+readme = "README.md"
+authors = [
+    { name = "Jian-Wei Wang", email = "jwdaniel@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "laya>=0.3.4",
+    "pygame-ce>=2.5.8",
+]
+
+[project.scripts]
+snake-laya = "snake_laya.main:main"
+
+[build-system]
+requires = ["uv_build>=0.10.11,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: loads the real Laya model (opt in with --run-slow)"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # intentional unicode (—, ·, →) in UI text and comments
