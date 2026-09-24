@@ -12,6 +12,10 @@ dependencies = [
     "pygame-ce>=2.5.8",
 ]
 
+[project.optional-dependencies]
+# Apple-silicon MLX runtime for --brain laya-mlx; mlx itself is arm64-macOS only
+mlx = ["laya-mlx>=0.2.0"]
+
 [project.scripts]
 snake-laya = "snake_laya.main:main"
 

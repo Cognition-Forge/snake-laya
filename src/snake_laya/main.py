@@ -3,6 +3,7 @@
 Usage:
     uv run snake-laya                         # sync versus, english checkpoint, auto device
     uv run snake-laya --mode max --model multilingual
+    uv run snake-laya --brain laya-mlx        # Apple-silicon MLX runtime
     uv run snake-laya --bench 200 --device mps
 """
 
@@ -15,7 +16,18 @@ import sys
 import threading
 from typing import TextIO
 
-from .brain import EXPERIMENTAL_MODELS, LAYA_MODELS, Brain, HeuristicBrain, LayaBrain, apply_safety, heuristic_pick
+from .brain import (
+    BACKEND_DEVICES,
+    BACKEND_MODELS,
+    DEVICES,
+    EXPERIMENTAL_MODELS,
+    MODELS,
+    Brain,
+    HeuristicBrain,
+    LayaBrain,
+    apply_safety,
+    heuristic_pick,
+)
 from .clock import ActiveClock
 from .config import GameConfig, Mode
 from .features import analyse
@@ -60,12 +72,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", type=Mode, choices=list(Mode), default=Mode.SYNC, help="sync: fair versus; max: unranked showcase"
     )
     p.add_argument("--tick-ms", type=_positive_int, default=120, help="snake step interval (default 120)")
+    p.add_argument(
+        "--computer-tick-ms",
+        type=_positive_int,
+        default=None,
+        help="computer step interval in sync mode (default: --tick-ms); differing ticks make the match unranked",
+    )
     p.add_argument("--grid", type=_grid, default=(30, 20), help=f"WxH, min {MIN_W}x{MIN_H} (default 30x20)")
     p.add_argument("--duration", type=_positive_float, default=180.0, help="active match seconds (default 180)")
     p.add_argument("--seed", type=int, default=None, help="board seed (default random)")
-    p.add_argument("--model", choices=list(LAYA_MODELS), default="english", help="Laya checkpoint (default english)")
-    p.add_argument("--device", choices=["cpu", "cuda", "mps"], default=None, help="default: auto")
-    p.add_argument("--brain", choices=["laya", "heuristic"], default="laya")
+    p.add_argument("--model", choices=list(MODELS), default="english", help="Laya checkpoint (default english)")
+    p.add_argument(
+        "--device",
+        choices=list(DEVICES),
+        default=None,
+        help="default: auto; laya takes cpu/cuda/mps, laya-mlx takes cpu/gpu/metal",
+    )
+    p.add_argument(
+        "--brain",
+        choices=[*BACKEND_MODELS, "heuristic"],
+        default="laya",
+        help="laya: PyTorch runtime; laya-mlx: Apple-silicon MLX runtime; heuristic: no model",
+    )
     p.add_argument("--no-safety", dest="safety", action="store_false", help="execute Laya's raw pick even if fatal")
     p.add_argument("--log", metavar="PATH", help="append one JSONL record per computer step")
     p.add_argument("--bench", type=_positive_int, metavar="N", help="headless: N computer decisions, print stats, exit")
@@ -73,7 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # device names are backend-specific, so argparse choices (their union) cannot reject a mismatch
+    if args.brain in BACKEND_DEVICES and args.device is not None and args.device not in BACKEND_DEVICES[args.brain]:
+        allowed = ", ".join(BACKEND_DEVICES[args.brain])
+        parser.error(f"--device {args.device} is not available for --brain {args.brain} (choose from {allowed})")
     if args.seed is None:
         args.seed = random.randrange(2**31)
     return args
@@ -85,6 +118,7 @@ def config_from(args: argparse.Namespace) -> GameConfig:
         width=w,
         height=h,
         tick_ms=args.tick_ms,
+        computer_tick_ms=args.computer_tick_ms,
         duration_s=args.duration,
         seed=args.seed,
         mode=args.mode,
@@ -95,11 +129,11 @@ def config_from(args: argparse.Namespace) -> GameConfig:
 def make_brain(args: argparse.Namespace) -> Brain:
     if args.brain == "heuristic":
         return HeuristicBrain()
-    return LayaBrain(args.model, args.device)
+    return LayaBrain(args.model, args.device, args.brain)
 
 
 def device_hint(args: argparse.Namespace) -> str:
-    if args.brain == "laya" and args.device != "cpu":
+    if args.brain in BACKEND_MODELS and args.device != "cpu":
         return "Hint: retry with --device cpu (some accelerator ops are unsupported)."
     return ""
 
@@ -197,7 +231,7 @@ def run_gui(args: argparse.Namespace) -> int:
     screen = pygame.display.set_mode(renderer.size)
     pygame.display.set_caption("snake-laya · human vs Laya")
     frame_clock = pygame.time.Clock()
-    labels = {"model": args.model if args.brain == "laya" else "heuristic", "device": args.device or "auto"}
+    labels = {"model": args.model if args.brain in BACKEND_MODELS else "heuristic", "device": args.device or "auto"}
 
     try:
         running = True
@@ -279,7 +313,7 @@ def _shutdown(runner, worker, log) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.brain == "laya" and args.model in EXPERIMENTAL_MODELS:
+    if args.brain in BACKEND_MODELS and args.model in EXPERIMENTAL_MODELS:
         print(
             f"warning: --model {args.model} is experimental: fine-tuned on four unrelated synthetic workflows",
             file=sys.stderr,

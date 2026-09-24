@@ -140,7 +140,7 @@ class ComputerRunner:
     def _await_input(self) -> bool:
         """True → step now. SYNC: wait until the tick deadline, collecting results; MAX: until a current result."""
         if self._mode is Mode.SYNC and self._deadline is None:
-            self._deadline = self._clock.now() + self._cfg.tick_s
+            self._deadline = self._clock.now() + self._cfg.computer_tick_s
         while not self._interrupted():
             if self._mode is Mode.MAX:
                 if self._held is not None:
@@ -207,9 +207,9 @@ class ComputerRunner:
             self._log.write(self._record(view, moves, decision, pick, overridden, baseline, result, score_before, now))
 
         if self._mode is Mode.SYNC and self._deadline is not None:
-            self._deadline += self._cfg.tick_s
+            self._deadline += self._cfg.computer_tick_s
             if self._deadline <= now:  # fell behind (e.g. OS stall): resync instead of bursting
-                self._deadline = now + self._cfg.tick_s
+                self._deadline = now + self._cfg.computer_tick_s
         if result.died:
             self._respawn_at = now + RESPAWN_S
             self._deadline = None

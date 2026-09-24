@@ -23,6 +23,7 @@ class GameConfig:
     width: int = 30
     height: int = 20
     tick_ms: int = 120
+    computer_tick_ms: int | None = None  # SYNC computer step interval; None → tick_ms
     duration_s: float = 180.0
     seed: int = 0
     mode: Mode = Mode.SYNC
@@ -31,3 +32,12 @@ class GameConfig:
     @property
     def tick_s(self) -> float:
         return self.tick_ms / 1000.0
+
+    @property
+    def computer_tick_s(self) -> float:
+        return (self.computer_tick_ms or self.tick_ms) / 1000.0
+
+    @property
+    def equal_ticks(self) -> bool:
+        """Both snakes step at the same rate: required for a ranked SYNC match."""
+        return self.computer_tick_ms in (None, self.tick_ms)

@@ -39,9 +39,10 @@ def runner_view(alive=True, probs=True, late=False, mode=Mode.SYNC):
     )
 
 
-def match_in(phase, mode=Mode.SYNC):
+def match_in(phase, mode=Mode.SYNC, computer_tick_ms=None):
     t = FakeTime()
-    m = Match(GameConfig(mode=mode, seed=4, duration_s=5), ActiveClock(t), wall=t)
+    cfg = GameConfig(mode=mode, seed=4, duration_s=5, computer_tick_ms=computer_tick_ms)
+    m = Match(cfg, ActiveClock(t), wall=t)
     if phase is Phase.LOADING:
         return m
     if phase is Phase.ERROR:
@@ -66,14 +67,16 @@ def match_in(phase, mode=Mode.SYNC):
 @pytest.mark.parametrize("phase", list(Phase))
 @pytest.mark.parametrize("mode", list(Mode))
 @pytest.mark.parametrize("with_runner", [True, False])
-def test_draw_every_phase(phase, mode, with_runner):
+@pytest.mark.parametrize("computer_tick_ms", [None, 60], ids=["equal-ticks", "cpu-tick"])
+def test_draw_every_phase(phase, mode, with_runner, computer_tick_ms):
     renderer = Renderer(30, 20)
     surf = pygame.Surface(renderer.size)
     stats = DecisionStats(lambda: 1.0)
     stats.record_prediction(9.1)
     stats.record_step(applied=True, late=False, override=False, agree=True, sharpness=0.4)
     rv = runner_view(mode=mode) if with_runner else None
-    renderer.draw(surf, match_in(phase, mode), rv, stats.view(), {"model": "LAYA english", "device": "mps"})
+    m = match_in(phase, mode, computer_tick_ms)
+    renderer.draw(surf, m, rv, stats.view(), {"model": "LAYA english", "device": "mps"})
 
 
 @pytest.mark.parametrize(

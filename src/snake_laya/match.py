@@ -221,8 +221,16 @@ class Match:
 
     @property
     def ranked(self) -> bool:
-        return self.mode is Mode.SYNC
+        return self.unranked_reason is None
+
+    @property
+    def unranked_reason(self) -> str | None:
+        if self.mode is Mode.MAX:
+            return "MAX SPEED"
+        if not self.cfg.equal_ticks:
+            return f"CPU TICK {self.cfg.computer_tick_ms}MS"
+        return None
 
     def standing(self, computer: BoardView) -> str | None:
         """Current leader / final winner: 'human' | 'computer' | 'draw' | None (unranked)."""
-        return rank(self.human.board.view(), computer, self.mode)
+        return rank(self.human.board.view(), computer, self.mode) if self.ranked else None

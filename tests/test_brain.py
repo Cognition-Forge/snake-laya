@@ -1,17 +1,30 @@
 import math
+import os
+from types import SimpleNamespace
 
 import pytest
 from helpers import make_view
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from snake_laya.brain import (
+    BACKEND_DEVICES,
+    BACKEND_MODELS,
+    CHECKPOINT_FILES,
+    LAYA_MLX_MODELS,
+    LAYA_MODELS,
     LAYA_REPO,
+    LAYA_REVISION,
+    MODELS,
+    Checkpoint,
     HeuristicBrain,
     LayaBrain,
     apply_safety,
     argmax_dir,
+    device_label,
     heuristic_pick,
     late_fallback,
     parse_probs,
+    resolve_checkpoint,
 )
 from snake_laya.features import Move, analyse
 from snake_laya.game import Dir
@@ -119,24 +132,77 @@ class StubAgent:
         return {"answers": {"move": self.answer}}
 
 
-@pytest.mark.parametrize(
-    "model, subfolder", [("english", None), ("multilingual", "multilingual"), ("typed-decisions", "typed-decisions")]
-)
-def test_laya_brain_loads_checkpoint(model, subfolder):
+@pytest.mark.parametrize("backend", list(BACKEND_MODELS))
+@pytest.mark.parametrize("model", MODELS)
+def test_laya_brain_loads_checkpoint(backend, model):
     seen = {}
+    ckpt = BACKEND_MODELS[backend][model]
 
     def loader(repo, device=None, subfolder=None):
         seen.update(repo=repo, device=device, subfolder=subfolder)
         return StubAgent({})
 
-    brain = LayaBrain(model, "cpu", loader=loader)
-    assert seen == {"repo": LAYA_REPO, "device": "cpu", "subfolder": subfolder}
-    assert brain.device == "mps" and brain.label == f"LAYA {model}"
+    brain = LayaBrain(model, "cpu", backend, loader=loader, resolve=lambda c: f"/snap/{c.repo}")
+    assert seen == {"repo": f"/snap/{ckpt.repo}", "device": "cpu", "subfolder": ckpt.subfolder}
+    assert brain.device == "mps" and brain.label == f"{backend.upper()} {model}"
+    assert brain.backend == backend and brain.model == model
 
 
-def test_laya_brain_unknown_model():
+def test_laya_brain_defaults_to_torch_backend():
+    brain = LayaBrain(loader=lambda *a, **k: StubAgent({}), resolve=NO_HUB)
+    assert brain.backend == "laya" and brain.label == "LAYA english"
+
+
+@pytest.mark.parametrize(
+    "model, backend, device",
+    [
+        ("klingon", "laya", None),  # unknown model
+        ("klingon", "laya-mlx", None),
+        ("english", "laya-onnx", None),  # unknown backend
+        ("english", "laya", "gpu"),  # MLX device name on the torch backend
+        ("english", "laya", "metal"),
+        ("english", "laya-mlx", "cuda"),  # torch device names on the MLX backend
+        ("english", "laya-mlx", "mps"),
+    ],
+)
+def test_laya_brain_rejects_bad_combinations(model, backend, device):
     with pytest.raises(ValueError):
-        LayaBrain("klingon", loader=lambda *a, **k: StubAgent({}))
+        LayaBrain(model, device, backend, loader=lambda *a, **k: StubAgent({}), resolve=NO_HUB)
+
+
+def test_laya_brain_rejects_bad_combination_before_loading():
+    """Validation must not pay for a model load first."""
+
+    def loader(*a, **k):
+        raise AssertionError("loader must not run")
+
+    with pytest.raises(ValueError):
+        LayaBrain("english", "cuda", "laya-mlx", loader=loader, resolve=NO_HUB)
+
+
+@pytest.mark.parametrize("backend", list(BACKEND_MODELS))
+@pytest.mark.parametrize("device", [None, "cpu"])
+def test_laya_brain_accepts_shared_and_absent_devices(backend, device):
+    brain = LayaBrain("english", device, backend, loader=lambda *a, **k: StubAgent({}), resolve=NO_HUB)
+    assert brain.backend == backend
+
+
+@pytest.mark.parametrize(
+    "agent_device, requested, expected",
+    [
+        ("mps", None, "mps"),  # torch reports a plain name
+        ("cuda:0", None, "cuda:0"),
+        ("Device(gpu, 0)", None, "gpu"),  # MLX repr
+        ("Device(cpu, 0)", "cpu", "cpu"),
+        ("Device(gpu, 12)", None, "gpu"),
+        (None, "cpu", "cpu"),  # agent exposes device=None → fall back to the request
+        (None, None, "auto"),
+        ("MISSING", "mps", "mps"),  # no device attribute at all
+    ],
+)
+def test_device_label(agent_device, requested, expected):
+    agent = object() if agent_device == "MISSING" else SimpleNamespace(device=agent_device)
+    assert device_label(agent, requested) == expected
 
 
 @pytest.mark.parametrize(
@@ -150,7 +216,7 @@ def test_laya_brain_unknown_model():
 )
 def test_laya_brain_decide(answer, raw, sharpness):
     agent = StubAgent(answer)
-    brain = LayaBrain("english", loader=lambda *a, **k: agent)
+    brain = LayaBrain("english", loader=lambda *a, **k: agent, resolve=NO_HUB)
     view = make_view([(5, 3), (4, 3), (3, 3)], R, food=(9, 3))
     decision = brain.decide(view, analyse(view))
     assert decision.raw is raw
@@ -163,7 +229,7 @@ def test_laya_brain_decide(answer, raw, sharpness):
 
 def test_laya_brain_warmup_calls_predict():
     agent = StubAgent({"probabilities": {"right": 1.0}})
-    LayaBrain("english", loader=lambda *a, **k: agent).warmup(3)
+    LayaBrain("english", loader=lambda *a, **k: agent, resolve=NO_HUB).warmup(3)
     assert len(agent.calls) == 3
 
 
@@ -172,7 +238,111 @@ def test_laya_brain_propagates_predict_errors():
         def predict(self, state, questions):
             raise RuntimeError("MPS op not supported")
 
-    brain = LayaBrain("english", loader=lambda *a, **k: Broken({}))
+    brain = LayaBrain("english", loader=lambda *a, **k: Broken({}), resolve=NO_HUB)
     view = make_view([(5, 3), (4, 3)], R, food=(9, 3))
     with pytest.raises(RuntimeError):
         brain.decide(view, analyse(view))
+
+
+def NO_HUB(ckpt):
+    return "/snap"
+
+
+class FakeHub:
+    """snapshot_download stand-in over a tmp snapshot dir; records calls."""
+
+    def __init__(self, root, cached: bool, online_error: Exception | None = None):
+        self.root, self.cached, self.online_error = str(root), cached, online_error
+        self.calls = []
+
+    def __call__(self, repo, *, revision, allow_patterns, local_files_only=False):
+        self.calls.append({"repo": repo, "revision": revision, "files": allow_patterns, "offline": local_files_only})
+        if local_files_only:
+            if not self.cached:
+                raise LocalEntryNotFoundError("not cached")
+            return self.root
+        if self.online_error:
+            raise self.online_error
+        for f in allow_patterns:
+            write(self.root, f)
+        return self.root
+
+
+def write(root, rel):
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("x")
+
+
+def prefixed(sub):
+    return [f"{sub}/{f}" if sub else f for f in CHECKPOINT_FILES]
+
+
+ALL_CHECKPOINTS = [
+    pytest.param(ckpt, id=f"{backend}-{model}")
+    for backend, models in BACKEND_MODELS.items()
+    for model, ckpt in models.items()
+]
+
+
+@pytest.mark.parametrize("ckpt", ALL_CHECKPOINTS)
+@pytest.mark.parametrize(
+    "cached, present, online",
+    [
+        (True, "all", False),  # complete cache → no hub call
+        (False, "none", True),  # revision never cached
+        (True, "none", True),  # snapshot dir exists (other checkpoint fetched) but not this one
+        (True, "partial", True),  # tokenizer/encoder missing → would send the backend to the hub
+    ],
+    ids=["hit", "miss", "other-checkpoint-only", "partial"],
+)
+def test_resolve_checkpoint(tmp_path, ckpt, cached, present, online):
+    files = prefixed(ckpt.subfolder)
+    for f in {"all": files, "none": [], "partial": files[:2]}[present]:
+        write(tmp_path, f)
+    hub = FakeHub(tmp_path, cached)
+    assert resolve_checkpoint(ckpt, download=hub) == str(tmp_path)
+    assert [c["offline"] for c in hub.calls] == ([True, False] if online else [True])
+    for call in hub.calls:
+        assert call == {"repo": ckpt.repo, "revision": ckpt.revision, "files": files, "offline": call["offline"]}
+    assert all(os.path.isfile(tmp_path / f) for f in files)
+
+
+def test_resolve_checkpoint_english_excludes_bundled_subfolders():
+    subs = {c.subfolder for c in LAYA_MODELS.values() if c.subfolder}
+    assert not any(f.split("/")[0] in subs for f in prefixed(None))
+
+
+def test_resolve_checkpoint_online_failure_propagates(tmp_path):
+    hub = FakeHub(tmp_path, cached=False, online_error=ConnectionError("offline"))
+    with pytest.raises(ConnectionError):
+        resolve_checkpoint(LAYA_MODELS["english"], download=hub)
+
+
+@pytest.mark.parametrize("ckpt", ALL_CHECKPOINTS)
+def test_revisions_are_commit_hashes(ckpt):
+    assert len(ckpt.revision) == 40 and all(c in "0123456789abcdef" for c in ckpt.revision)
+
+
+def test_torch_checkpoints_share_one_pinned_repo():
+    assert {(c.repo, c.revision) for c in LAYA_MODELS.values()} == {(LAYA_REPO, LAYA_REVISION)}
+
+
+def test_mlx_checkpoints_use_distinct_repo_roots():
+    """MLX ports are published one repo per checkpoint, so none may carry a subfolder."""
+    assert len({c.repo for c in LAYA_MLX_MODELS.values()}) == len(LAYA_MLX_MODELS)
+    assert all(c.subfolder is None for c in LAYA_MLX_MODELS.values())
+
+
+def test_backends_offer_the_same_model_names():
+    assert all(tuple(models) == MODELS for models in BACKEND_MODELS.values())
+
+
+def test_every_backend_declares_devices():
+    assert set(BACKEND_DEVICES) == set(BACKEND_MODELS)
+    assert all("cpu" in devices for devices in BACKEND_DEVICES.values())
+
+
+def test_checkpoint_defaults_to_repo_root():
+    assert Checkpoint("repo", "abc").subfolder is None

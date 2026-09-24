@@ -81,10 +81,12 @@ def test_human_death_respawns_after_active_second():
     assert ctl.board.alive and len(ctl.board.body) == START_LEN and ctl.board.deaths == 1
 
 
-def build_match(t, *, mode=Mode.SYNC, duration=10.0):
+def build_match(t, *, mode=Mode.SYNC, duration=10.0, computer_tick_ms=None):
     clock = ActiveClock(t)
     resets = []
-    cfg = GameConfig(width=12, height=8, tick_ms=100, duration_s=duration, seed=5, mode=mode)
+    cfg = GameConfig(
+        width=12, height=8, tick_ms=100, computer_tick_ms=computer_tick_ms, duration_s=duration, seed=5, mode=mode
+    )
     m = Match(cfg, clock, on_reset=lambda seed, mode: resets.append((seed, mode)), wall=t)
     return m, clock, resets
 
@@ -211,10 +213,21 @@ def test_fail_pauses_clock():
     assert m.phase is Phase.ERROR
 
 
-@pytest.mark.parametrize("mode, expected", [(Mode.SYNC, "computer"), (Mode.MAX, None)])
-def test_standing(mode, expected):
+@pytest.mark.parametrize(
+    "mode, computer_tick_ms, expected, reason",
+    [
+        (Mode.SYNC, None, "computer", None),
+        (Mode.SYNC, 100, "computer", None),  # explicit tick equal to human tick
+        (Mode.SYNC, 50, None, "CPU TICK 50MS"),
+        (Mode.SYNC, 200, None, "CPU TICK 200MS"),
+        (Mode.MAX, None, None, "MAX SPEED"),
+        (Mode.MAX, 50, None, "MAX SPEED"),  # MAX takes precedence
+    ],
+)
+def test_standing(mode, computer_tick_ms, expected, reason):
     t = FakeTime()
-    m, _, _ = build_match(t, mode=mode)
+    m, _, _ = build_match(t, mode=mode, computer_tick_ms=computer_tick_ms)
     computer = Board(12, 8, seed=5)
     computer.total_food = 3
     assert m.standing(computer.view()) == expected
+    assert m.unranked_reason == reason and m.ranked is (reason is None)

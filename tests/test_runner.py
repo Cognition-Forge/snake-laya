@@ -13,11 +13,24 @@ U, D, L, R = Dir.UP, Dir.DOWN, Dir.LEFT, Dir.RIGHT
 NEVER = 1e9  # inference latency that never completes within a test
 
 
-def build(t, *, mode=Mode.SYNC, latency=0.03, decide=straight_decision, safety=True, tick_ms=100, log=None, meta=None):
+def build(
+    t,
+    *,
+    mode=Mode.SYNC,
+    latency=0.03,
+    decide=straight_decision,
+    safety=True,
+    tick_ms=100,
+    computer_tick_ms=None,
+    log=None,
+    meta=None,
+):
     clock = ActiveClock(t)
     stats = DecisionStats(clock.now)
     worker = FakeWorker(t, latency, decide)
-    cfg = GameConfig(width=12, height=8, tick_ms=tick_ms, seed=1, mode=mode, safety=safety)
+    cfg = GameConfig(
+        width=12, height=8, tick_ms=tick_ms, computer_tick_ms=computer_tick_ms, seed=1, mode=mode, safety=safety
+    )
     runner = ComputerRunner(cfg, worker=worker, clock=clock, stats=stats, log=log, meta=meta)
     clock.start()
     return runner, worker, clock, stats
@@ -50,6 +63,34 @@ def test_sync_on_time_prediction_applied_at_deadline():
     assert runner.view().board.head == (head[0] + 1, head[1])
     assert runner.view().executed is R and not runner.view().last_late
     assert len(worker.submitted) == 2  # next generation requested
+
+
+@pytest.mark.parametrize(
+    "computer_tick_ms, latency, step_times, late",
+    [
+        (None, 0.01, [0.1, 0.2, 0.3], 0),  # unset → human tick
+        (40, 0.01, [0.04, 0.08, 0.12], 0),  # faster than human tick
+        (250, 0.01, [0.25, 0.5, 0.75], 0),  # slower than human tick
+        (40, 0.06, [0.04, 0.08, 0.12], 3),  # inference slower than computer tick → LATE
+    ],
+)
+def test_sync_paced_by_computer_tick(computer_tick_ms, latency, step_times, late):
+    t = FakeTime()
+    runner, _, _, stats = build(t, tick_ms=100, computer_tick_ms=computer_tick_ms, latency=latency)
+    times = []
+    for _ in step_times:
+        runner.iterate()
+        times.append(t.t)
+    assert times == pytest.approx(step_times)
+    s = stats.view()
+    assert (s.steps, s.late) == (len(step_times), late)
+
+
+def test_max_mode_ignores_computer_tick():
+    t = FakeTime()
+    runner, _, _, stats = build(t, mode=Mode.MAX, computer_tick_ms=500, latency=0.02)
+    runner.iterate()
+    assert t.t == pytest.approx(0.02) and stats.view().steps == 1
 
 
 def test_sync_slow_inference_misses_several_ticks():

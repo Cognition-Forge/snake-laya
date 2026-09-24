@@ -114,7 +114,7 @@ class Renderer:
         )
         self._human_stats(surf, left, match)
 
-        mode_label = "SYNC" if match.ranked else "MAX SPEED · NOT RANKED"
+        mode_label = "SYNC" if match.ranked else f"{match.unranked_reason} · NOT RANKED"
         title = f"{labels.get('model', '')} · {labels.get('device', '')} · {mode_label}".upper()
         if runner is not None:
             self._panel(surf, right, runner.board, title, LAYA_ACCENT, LAYA_TAIL, dead_note=not runner.board.alive)
@@ -261,11 +261,14 @@ class Renderer:
             self._text(surf, self.f_count, str(max(1, match.countdown_left)), TEXT, center, "center")
             return
         if phase is Phase.LOADING:
-            self._box(surf, ["LOADING LAYA", "", "first run downloads the checkpoint", "ESC to quit"])
+            self._box(surf, ["LOADING LAYA", "", "first run of a checkpoint downloads it", "ESC to quit"])
         elif phase is Phase.PAUSED:
             self._box(surf, ["PAUSED", "", "SPACE resume   ·   R restart   ·   M mode   ·   ESC quit"])
         elif phase is Phase.CONFIRM_MODE:
-            target = "MAX SPEED (unranked)" if match.mode.other is Mode.MAX else "SYNC (ranked)"
+            if match.mode.other is Mode.MAX:
+                target = "MAX SPEED (unranked)"
+            else:
+                target = "SYNC (ranked)" if match.cfg.equal_ticks else "SYNC (unranked: CPU tick differs)"
             lines = [f"SWITCH TO {target.upper()}?", "", "this restarts the match", "Y confirm   ·   N / ESC cancel"]
             self._box(surf, lines)
         elif phase is Phase.ERROR:
@@ -279,7 +282,10 @@ class Renderer:
         if runner is None:
             return ["MATCH OVER"]
         comp = runner.board
-        title = self._standing_text(match, comp, final=True) if match.ranked else "NOT RANKED · MAX SPEED"
+        if match.ranked:
+            title = self._standing_text(match, comp, final=True)
+        else:
+            title = f"NOT RANKED · {match.unranked_reason}"
         row = "{:<16}{:>8}{:>8}"
         return [
             title,

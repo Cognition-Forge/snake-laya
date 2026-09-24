@@ -2,21 +2,29 @@
 
 Two side-by-side boards: you steer with arrow keys, the computer's snake is steered by [Laya](https://github.com/NandhaKishorM/laya) (one `choice` decision per step), with live decision telemetry. Design: `../00draft/snake-laya-design.md`.
 
+Two model runtimes serve the same three checkpoints: `--brain laya` (upstream PyTorch) and `--brain laya-mlx` ([laya-mlx](https://github.com/mizorewww/laya-mlx), Apple silicon). They pick identically; MLX is ~1.2–1.6× faster here.
+
 ## Setup
 
 ```bash
-uv sync
+uv sync                 # laya (PyTorch) + heuristic
+uv sync --extra mlx     # also laya-mlx; Apple silicon only
 ```
 
 - Python 3.12 (`.python-version`); deps managed by `uv` only
-- First run downloads the checkpoint from Hugging Face; cached afterwards
+- First run of a checkpoint downloads only that checkpoint (pinned revision in `brain.py`) to the Hugging Face cache (`~/.cache/huggingface/hub`, `HF_HOME` to move); later starts load from cache with no network
+- Each backend has its own weights: `laya` pins one bundled repo (`LAYA_REVISION`), `laya-mlx` pins one repo per checkpoint (`LAYA_MLX_MODELS`). Switching backends downloads once more
+- New upstream revision: bump the pin in the matching `Checkpoint`; the next start downloads it once
 
 ## Run
 
 ```bash
 uv run snake-laya                                  # sync versus, english checkpoint, auto device
 uv run snake-laya --mode max                       # unranked showcase: computer steps per decision
+uv run snake-laya --computer-tick-ms 60            # computer steps 2× faster than you (unranked)
 uv run snake-laya --model multilingual --device mps
+uv run snake-laya --brain laya-mlx                 # same weights, MLX runtime (Apple silicon)
+uv run snake-laya --brain laya-mlx --device cpu    # MLX on CPU instead of the Metal GPU
 uv run snake-laya --log run.jsonl                  # one JSONL record per computer step
 uv run snake-laya --bench 400 --device mps         # headless throughput/quality, no display needed
 uv run snake-laya --brain heuristic                # no model: heuristic baseline plays
@@ -26,17 +34,18 @@ uv run snake-laya --brain heuristic                # no model: heuristic baselin
 |---|---|---|
 | `--mode` | `sync` (ranked, computer steps on the tick), `max` (unranked showcase) | `sync` |
 | `--tick-ms` | int > 0 | `120` |
+| `--computer-tick-ms` | int > 0; computer step interval in `sync` (ignored in `max`); ≠ `--tick-ms` → unranked | `--tick-ms` |
 | `--grid` | `WxH`, min `12x8` | `30x20` |
 | `--duration` | active seconds > 0 | `180` |
 | `--seed` | int | random, shown in footer |
 | `--model` | `english`, `multilingual`, `typed-decisions` (experimental, warns) | `english` |
-| `--device` | `cpu`, `cuda`, `mps` | auto |
-| `--brain` | `laya`, `heuristic` | `laya` |
+| `--device` | `laya`: `cpu`, `cuda`, `mps` · `laya-mlx`: `cpu`, `gpu`, `metal` | auto |
+| `--brain` | `laya` (PyTorch), `laya-mlx` (Apple silicon), `heuristic` | `laya` |
 | `--no-safety` | execute Laya's raw pick even if fatal | off |
 | `--log PATH` | append JSONL decision log | off |
 | `--bench N` | headless: N decisions, print stats, exit | off |
 
-Invalid values exit with code 2.
+Invalid values exit with code 2, including a `--device` the chosen `--brain` does not support.
 
 ## Controls
 
@@ -51,7 +60,7 @@ Invalid values exit with code 2.
 ## Rules
 
 - Score +1 per food; death → respawn after 1 s of active time, score resets, `TOTAL` keeps counting
-- Winner (`sync` only): total food, then best life, then fewer deaths
+- Winner (`sync` with equal ticks only): total food, then best life, then fewer deaths
 - Same seed = same initial board; food diverges once bodies differ
 
 ## Telemetry (computer panel)
@@ -67,15 +76,19 @@ Invalid values exit with code 2.
 | `LATE` | ticks executed without a current prediction (continue straight, safety-checked) |
 | `BASELINE AGREE` | raw pick == heuristic baseline (a heuristic, not an oracle) |
 
-## Measured (Apple MPS, seed 1, 400 decisions, `--bench`)
+## Measured (Apple silicon, seed 1, 400 decisions, `--bench`)
 
-| Brain | P50 ms | decisions/s | food | overrides |
-|---|---|---|---|---|
-| `english` | 40 | 25.5 | 20 | 0.8% |
-| `multilingual` | 20 | 46.6 | 2 | 21.2% |
-| `heuristic` | ~0 | 520 | 19 | 0% |
+| Brain | Model | P50 ms | decisions/s | food | overrides |
+|---|---|---|---|---|---|
+| `laya` (mps) | `english` | 39 | 25.3 | 20 | 0.8% |
+| `laya` (mps) | `multilingual` | 20 | 46.6 | 2 | 21.2% |
+| `laya-mlx` (gpu) | `english` | 32 | 33.2 | 20 | 0.8% |
+| `laya-mlx` (gpu) | `multilingual` | 13 | 67.6 | 2 | 21.2% |
+| `heuristic` | — | ~0 | 520 | ~19 | 0% |
 
-`english` P50 fits the 120 ms tick with margin (GUI adds ~15 ms contention).
+`english` P50 fits the 120 ms tick with margin on both backends (GUI adds ~15 ms contention).
+
+Both backends played the identical game on each checkpoint (same food, deaths and override rate; mean sharpness 0.158 vs 0.159), so the MLX port is a drop-in swap for speed, not a behaviour change.
 
 ## Code map (`src/snake_laya/`)
 
@@ -83,10 +96,10 @@ Invalid values exit with code 2.
 |---|---|
 | `game.py` | pure rules: `Board`, `Dir`, collision, seeded row-major food |
 | `features.py` | per-direction facts (fatal, food distance, flood-fill room, trap) → Laya state/question text |
-| `brain.py` | `LayaBrain`, `HeuristicBrain`, `apply_safety`, `late_fallback` |
+| `brain.py` | `LayaBrain` (either backend), `HeuristicBrain`, `Checkpoint` pins, `apply_safety`, `late_fallback`, `resolve_checkpoint` (cache-first, pinned revision) |
 | `inference.py` | `InferenceWorker`: one predict at a time, latest-request-only mailbox |
-| `runner.py` | `ComputerRunner`: owns computer board, sync deadline / max pacing, generation-matched results |
-| `match.py` | phases, `HumanController`, `InputQueue`, confirm/reset/pause |
+| `runner.py` | `ComputerRunner`: owns computer board, sync deadline (computer tick) / max pacing, generation-matched results |
+| `match.py` | phases, `HumanController`, `InputQueue`, confirm/reset/pause, ranked/unranked |
 | `clock.py` | `ActiveClock`: pause-aware time shared by all components |
 | `stats.py` | `DecisionStats`, `HumanStats`, `rank` |
 | `decision_log.py` | line-buffered JSONL log |
@@ -97,7 +110,7 @@ Invalid values exit with code 2.
 
 ```bash
 uv run pytest                                          # fast suite; real-model tests skipped with reason
-uv run pytest --run-slow tests/test_laya_smoke.py      # loads real english + multilingual checkpoints
+uv run pytest --run-slow tests/test_laya_smoke.py      # real english + multilingual on every installed backend
 uvx ruff check src tests && uvx ruff format --check src tests
 ```
 
@@ -105,6 +118,8 @@ uvx ruff check src tests && uvx ruff format --check src tests
 
 - Laya base checkpoints are weak zero-shot at spatial reasoning: all geometry is precomputed into the option text. Prompt wording matters a lot (tuning notes in `features.py` docstring)
 - `multilingual` is ~2× faster but near-random on this prompt; `english` is the default for that reason
-- CPU inference (~200–500 ms per Laya README) exceeds the default tick: expect high `LATE`; raise `--tick-ms` or use `--device mps/cuda`
+- CPU inference (~200–500 ms per Laya README) exceeds the default tick: expect high `LATE`; raise `--tick-ms` or use an accelerator
 - Accelerator op errors during inference are not retried on CPU: the error overlay suggests `--device cpu`
+- `laya-mlx` needs Apple silicon (`mlx` ships arm64-macOS wheels only) and is an independent port, not an official Convai release; it is not installed by a plain `uv sync`
+- `laya-mlx` warns at load that it clamps an out-of-range calibration temperature. That bucket is for questions with 11+ options, which this 3-move prompt never reaches, so `SHARPNESS` is unaffected
 - `--log` output is raw telemetry (input, decision, outcome), not a ready training set
