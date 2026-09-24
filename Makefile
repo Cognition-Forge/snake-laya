@@ -8,22 +8,19 @@ ARGS  ?=
 N     ?= 400
 
 .DEFAULT_GOAL := help
-.PHONY: help sync sync-mlx run run-mlx run-heuristic bench test test-slow lint fmt check clean
+.PHONY: help sync run run-mlx run-heuristic bench test test-slow lint fmt check clean
 
 help: ## list targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo "  vars: ARGS=\"<snake-laya/pytest flags>\"  N=<bench decisions, default $(N)>"
 
-sync: ## install laya (PyTorch) + dev deps; drops the mlx extra if present
+sync: ## install laya (PyTorch) + dev deps (+ laya-mlx on Apple silicon)
 	$(UV) sync
-
-sync-mlx: ## also install laya-mlx (Apple silicon only)
-	$(UV) sync --extra mlx
 
 run: ## play: human vs Laya (PyTorch)
 	$(UV) run snake-laya $(ARGS)
 
-run-mlx: ## play with the MLX runtime (needs sync-mlx)
+run-mlx: ## play with the MLX runtime (Apple silicon)
 	$(UV) run snake-laya --brain laya-mlx $(ARGS)
 
 run-heuristic: ## play against the heuristic baseline, no model

@@ -7,8 +7,7 @@ Two model runtimes serve the same three checkpoints: `--brain laya` (upstream Py
 ## Setup
 
 ```bash
-uv sync                 # laya (PyTorch) + heuristic
-uv sync --extra mlx     # also laya-mlx; Apple silicon only
+uv sync                 # laya (PyTorch) + heuristic; also laya-mlx on Apple silicon
 ```
 
 - Python 3.12 (`.python-version`); deps managed by `uv` only
@@ -119,7 +118,7 @@ uvx ruff check src tests && uvx ruff format --check src tests
 - Laya base checkpoints are weak zero-shot at spatial reasoning: all geometry is precomputed into the option text. Prompt wording matters a lot (tuning notes in `features.py` docstring)
 - `multilingual` is ~2× faster but near-random on this prompt; `english` is the default for that reason
 - CPU inference (~200–500 ms per Laya README) exceeds the default tick: expect high `LATE`; raise `--tick-ms` or use an accelerator
-- Accelerator op errors during inference are not retried on CPU: the error overlay suggests `--device cpu`
-- `laya-mlx` needs Apple silicon (`mlx` ships arm64-macOS wheels only) and is an independent port, not an official Convai release; it is not installed by a plain `uv sync`
+- Accelerator op errors are not retried on CPU: the error overlay suggests `--device cpu`. A missing or broken runtime import suggests `uv sync` instead
+- `laya-mlx` needs Apple silicon (`mlx` ships arm64-macOS wheels only) and is an independent port, not an official Convai release. `uv sync` installs it on arm64 macOS only; elsewhere `--brain laya-mlx` exits at startup (code 1) with an install error
 - `laya-mlx` warns at load that it clamps an out-of-range calibration temperature. That bucket is for questions with 11+ options, which this 3-move prompt never reaches, so `SHARPNESS` is unaffected
 - `--log` output is raw telemetry (input, decision, outcome), not a ready training set

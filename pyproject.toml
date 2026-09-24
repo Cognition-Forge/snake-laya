@@ -9,12 +9,10 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "laya>=0.3.4",
+    # MLX runtime for --brain laya-mlx; mlx ships arm64-macOS wheels only
+    "laya-mlx>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "pygame-ce>=2.5.8",
 ]
-
-[project.optional-dependencies]
-# Apple-silicon MLX runtime for --brain laya-mlx; mlx itself is arm64-macOS only
-mlx = ["laya-mlx>=0.2.0"]
 
 [project.scripts]
 snake-laya = "snake_laya.main:main"

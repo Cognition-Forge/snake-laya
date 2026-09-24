@@ -108,6 +108,7 @@ def test_config_from_args_computer_tick():
     ],
 )
 def test_experimental_model_warning(argv, warns, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "find_spec", lambda name: object())  # env-independent: laya_mlx is arm64-macOS only
     monkeypatch.setattr(cli, "run_gui", lambda args: 0)
     assert cli.main(argv) == 0
     assert ("experimental" in capsys.readouterr().err) is warns
@@ -123,32 +124,99 @@ def test_bench_heuristic_prints_table():
     assert "HEURISTIC" in text and "30 in" in text
 
 
-def test_bench_load_failure_returns_1_with_hint(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "argv, exc, want, not_want",
+    [
+        (["--bench", "5"], RuntimeError("no MPS kernel"), "--device cpu", "uv sync"),
+        (
+            ["--bench", "5", "--brain", "laya-mlx"],
+            ModuleNotFoundError("No module named 'mlx'"),
+            "uv sync",
+            "--device cpu",
+        ),
+        (["--bench", "5", "--device", "cpu"], RuntimeError("bad weights"), None, "Hint"),
+    ],
+)
+def test_bench_load_failure_returns_1_with_hint(argv, exc, want, not_want, monkeypatch, capsys):
     def boom(args):
-        raise RuntimeError("no MPS kernel")
+        raise exc
 
     monkeypatch.setattr(cli, "make_brain", boom)
-    args = cli.parse_args(["--bench", "5"])
-    assert cli.run_bench(args, io.StringIO()) == 1
+    assert cli.run_bench(cli.parse_args(argv), io.StringIO()) == 1
     err = capsys.readouterr().err
-    assert "no MPS kernel" in err and "--device cpu" in err
+    assert str(exc) in err and not_want not in err
+    assert want is None or want in err
 
 
 @pytest.mark.parametrize(
-    "brain, device, hint",
+    "brain, device, exc, want",
     [
-        ("laya", None, True),
-        ("laya", "mps", True),
-        ("laya", "cpu", False),
-        ("laya-mlx", None, True),
-        ("laya-mlx", "gpu", True),
-        ("laya-mlx", "cpu", False),
-        ("heuristic", None, False),
-        ("heuristic", "mps", False),
+        ("laya", None, None, "--device cpu"),
+        ("laya", "mps", RuntimeError("op"), "--device cpu"),
+        ("laya", "cpu", RuntimeError("op"), ""),
+        ("laya", "mps", ImportError("torch"), "uv sync"),
+        ("laya-mlx", None, ModuleNotFoundError("laya_mlx"), "uv sync"),
+        ("laya-mlx", "cpu", ImportError("mlx"), "uv sync"),  # import fails before the device is used
+        ("laya-mlx", "gpu", None, "--device cpu"),
+        ("laya-mlx", "cpu", None, ""),
+        ("heuristic", "mps", ImportError("x"), ""),
+        ("heuristic", None, None, ""),
     ],
 )
-def test_device_hint(brain, device, hint):
-    assert bool(cli.device_hint(SimpleNamespace(brain=brain, device=device))) is hint
+def test_failure_hint(brain, device, exc, want):
+    hint = cli.failure_hint(SimpleNamespace(brain=brain, device=device), exc)
+    if want:
+        assert want in hint
+        assert ("--device cpu" in hint) is (want == "--device cpu")
+    else:
+        assert hint == ""
+
+
+def _no_find_spec(name):
+    raise AssertionError(f"find_spec({name!r}) must not be called")
+
+
+@pytest.mark.parametrize(
+    "brain, spec, find, want",
+    [
+        ("laya-mlx", None, None, ("laya_mlx", "uv sync", "arm64", "linux/x86_64")),
+        ("laya", None, None, ("--brain laya ", "laya package", "uv sync")),
+        ("laya-mlx", object(), None, ()),
+        ("laya", object(), None, ()),
+        ("heuristic", None, _no_find_spec, ()),
+    ],
+)
+def test_missing_backend(brain, spec, find, want, monkeypatch):
+    monkeypatch.setattr(cli, "find_spec", find or (lambda name: spec))
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(cli.platform, "machine", lambda: "x86_64")
+    msg = cli.missing_backend(brain)
+    if not want:
+        assert msg == ""
+    for part in want:
+        assert part in msg
+    if brain == "laya":
+        assert "arm64" not in msg
+
+
+@pytest.mark.parametrize("extra", [[], ["--bench", "5"]])
+def test_main_missing_backend_exits_1_before_run(extra, monkeypatch, capsys):
+    def never(*a, **k):
+        raise AssertionError("must fail before running")
+
+    monkeypatch.setattr(cli, "find_spec", lambda name: None)
+    monkeypatch.setattr(cli, "run_gui", never)
+    monkeypatch.setattr(cli, "run_bench", never)
+    assert cli.main(["--brain", "laya-mlx", "--model", "typed-decisions", *extra]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: --brain laya-mlx needs the laya_mlx package")
+    assert "experimental" not in err
+
+
+def test_main_heuristic_skips_backend_check(monkeypatch):
+    monkeypatch.setattr(cli, "find_spec", _no_find_spec)
+    monkeypatch.setattr(cli, "run_gui", lambda args: 0)
+    assert cli.main(["--brain", "heuristic"]) == 0
 
 
 def test_bench_is_headless():

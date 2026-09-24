@@ -938,12 +938,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "laya" },
+    { name = "laya-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "pygame-ce" },
-]
-
-[package.optional-dependencies]
-mlx = [
-    { name = "laya-mlx" },
 ]
 
 [package.dev-dependencies]
@@ -954,10 +950,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "laya", specifier = ">=0.3.4" },
-    { name = "laya-mlx", marker = "extra == 'mlx'", specifier = ">=0.2.0" },
+    { name = "laya-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.2.0" },
     { name = "pygame-ce", specifier = ">=2.5.8" },
 ]
-provides-extras = ["mlx"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.1.1" }]

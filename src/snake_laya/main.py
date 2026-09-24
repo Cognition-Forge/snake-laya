@@ -10,15 +10,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import platform
 import random
 import re
 import sys
 import threading
+from importlib.util import find_spec
 from typing import TextIO
 
 from .brain import (
     BACKEND_DEVICES,
     BACKEND_MODELS,
+    BACKEND_PACKAGES,
     DEVICES,
     EXPERIMENTAL_MODELS,
     MODELS,
@@ -132,8 +135,24 @@ def make_brain(args: argparse.Namespace) -> Brain:
     return LayaBrain(args.model, args.device, args.brain)
 
 
-def device_hint(args: argparse.Namespace) -> str:
-    if args.brain in BACKEND_MODELS and args.device != "cpu":
+def missing_backend(brain: str) -> str:
+    """Pre-flight: error text if the backend package is absent, else "". find_spec does not import it."""
+    package = BACKEND_PACKAGES.get(brain)
+    if package is None or find_spec(package) is not None:
+        return ""
+    msg = f"--brain {brain} needs the {package} package, which is not installed; run `uv sync`"
+    if brain == "laya-mlx":
+        msg += f" (installed on Apple silicon / arm64 macOS only; this Python is {sys.platform}/{platform.machine()})"
+    return msg
+
+
+def failure_hint(args: argparse.Namespace, exc: BaseException | None = None) -> str:
+    if args.brain not in BACKEND_MODELS:
+        return ""
+    # package present but a transitive import (e.g. mlx) failed: the device is never reached
+    if isinstance(exc, ImportError):
+        return f"Hint: the {args.brain} runtime is incomplete; run `uv sync`."
+    if args.device != "cpu":
         return "Hint: retry with --device cpu (some accelerator ops are unsupported)."
     return ""
 
@@ -152,7 +171,7 @@ def run_bench(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
         brain.warmup()
     except Exception as exc:
         print(f"error: model load/warm-up failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        if hint := device_hint(args):
+        if hint := failure_hint(args, exc):
             print(hint, file=sys.stderr)
         return 1
 
@@ -203,7 +222,6 @@ def run_gui(args: argparse.Namespace) -> int:
     clock = ActiveClock()
     stats = DecisionStats(clock.now)
     log = DecisionLog(args.log) if args.log else NullLog()
-    hint = device_hint(args)
     runner: ComputerRunner | None = None
     worker: InferenceWorker | None = None
 
@@ -221,7 +239,10 @@ def run_gui(args: argparse.Namespace) -> int:
             brain.warmup()
             loaded["brain"] = brain
         except Exception as exc:
-            loaded["error"] = f"{type(exc).__name__}: {exc}"
+            # one dict write: the render loop polls "error" and must never see it without its hint
+            loaded["error"] = (
+                f"Model load/warm-up failed: {type(exc).__name__}: {exc}\n{failure_hint(args, exc)}".strip()
+            )
 
     loader = threading.Thread(target=load, name="model-loader", daemon=True)
     loader.start()
@@ -244,7 +265,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
             if runner is None and match.phase is Phase.LOADING:
                 if "error" in loaded:
-                    match.fail(f"Model load/warm-up failed: {loaded['error']}\n{hint}".strip())
+                    match.fail(loaded["error"])
                 elif "brain" in loaded:
                     brain = loaded["brain"]
                     labels = {"model": brain.label, "device": brain.device}
@@ -263,7 +284,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
             runner_view = runner.view() if runner is not None else None
             if runner_view is not None and runner_view.error and match.phase is not Phase.ERROR:
-                match.fail(f"Inference failed: {runner_view.error}\n{hint}".strip())
+                match.fail(f"Inference failed: {runner_view.error}\n{failure_hint(args)}".strip())
             match.update()
 
             renderer.draw(screen, match, runner_view, stats.view(), labels)
@@ -313,6 +334,10 @@ def _shutdown(runner, worker, log) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # before any window/thread: a missing runtime otherwise surfaces only after the GUI opens
+    if msg := missing_backend(args.brain):
+        print(f"error: {msg}", file=sys.stderr)
+        return 1
     if args.brain in BACKEND_MODELS and args.model in EXPERIMENTAL_MODELS:
         print(
             f"warning: --model {args.model} is experimental: fine-tuned on four unrelated synthetic workflows",
